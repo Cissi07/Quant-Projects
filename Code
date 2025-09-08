@@ -1,0 +1,250 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import statsmodels.api as sm
+from pandas_datareader import data as pdr
+
+def EG_method(X,Y,show_summary=False):
+    
+    #Step 1
+    #Estimate long run equilibrium with OLS regression
+    model1 = sm.OLS(Y,sm.add_constant(X)).fit()
+    epsilon = model1.resid
+    
+    if show_summary:
+        print('\nStep 1\n')
+        print(model1.summary())
+        
+    #ADF test: if p-value is < or = 5%, reject H_0 so stationary
+    if sm.tsa.stattools.adfuller(epsilon)[1]>0.05:
+        return False,model1
+    
+    #Step 2
+    #take first order difference of X and Y plus the lagged residual from step 1:
+    #X.diff = delta(X_t) = X_t - X_{t-1} the short-run change in X
+    #epsilon.shift(1)shifts the cointegration residuals down by 1 time step to give the lagged residual
+    #.dropna() drops the first row(s), since differencing and lagging create missing values.
+    X_dif = sm.add_constant(pd.concat([X.diff(),epsilon.shift(1)],axis=1).dropna())
+    Y_dif = Y.diff().dropna()
+    
+    #ECM
+    model2 = sm.OLS(Y_dif, X_dif).fit()
+    
+    if show_summary:
+        print('\nStep 2\n')
+        print(model2.summary())
+        
+    #model2.params will return gamma, B(L), and alpha
+    #Alpha must be negative
+    if list(model2.params)[-1]>0:
+        #print("Positive alpha")
+        return False,model1
+    else:
+        return True,model1
+
+def signal_generation(asset1,asset2,method,bandwidth=250):
+    
+    signals = pd.DataFrame()
+    signals['asset1'] = asset1['Close']
+    signals['asset2'] = asset2['Close']
+    signals['signals1'] = 0 #1 for long, -1 for short
+    signals['signals2'] = 0
+    
+    #initialize
+    prev_status = False #prev_status=true means you were previously in trade
+    signals['z'] = np.nan
+    signals['z upper limit'] = np.nan
+    signals['z lower limit'] = np.nan
+    signals['fitted'] = np.nan    
+    signals['residual'] = np.nan
+    
+    #Signal processing
+    for i in range (bandwidth,len(signals)):
+        
+        #cointegration test
+        coint_status, model = method(signals['asset1'].iloc[i-bandwidth:i],
+                                    signals['asset2'].iloc[i-bandwidth:i])
+        
+        if prev_status and not coint_status:
+            #once the pair stops being cointegrated, clear positions:
+            if signals.at[signals.index[i-1],'signals1']!=0:
+                #if there has been a long/short position yesterday
+                signals.at[signals.index[i],'signals1']=0
+                signals.at[signals.index[i],'signals2']=0
+                signals['z'].iloc[i:]=np.nan
+                signals['z upper limit'].iloc[i:]=np.nan
+                signals['z lower limit'].iloc[i:]=np.nan
+                signals['fitted'].iloc[i:]=np.nan
+                signals['residual'].iloc[i:]=np.nan
+                
+        if not prev_status and coint_status:
+            
+            #predict the price to compute the residual
+            #.predict(...)is a Statsmodels method that uses the fitted model 
+            #to generate predicted values of asset2 based on new input data asset1
+            signals['fitted'].iloc[i:] = model.predict(sm.add_constant(signals['asset1'].iloc[i:]))
+            signals['residual'].iloc[i:] = signals['asset2'].iloc[i:] - signals['fitted'].iloc[i:]
+            
+            #normalize the residual to get z stat, which should be a white noise of N(0,1)
+            signals['z'].iloc[i:] = (signals['residual'].iloc[i:] - np.mean(model.resid)) / np.std(model.resid)
+            
+            #setting threshold
+            signals['z upper limit'].iloc[i:] = 1 #signals['z'].iloc[i] + np.std(model.resid)
+            signals['z lower limit'].iloc[i:] = -1 #signals['z'].iloc[i] - np.std(model.resid)
+            
+        if coint_status and signals['z'].iloc[i] > signals['z upper limit'].iloc[i]:
+            #asset2 price is too high
+            signals.at[signals.index[i],'signals1'] = 1
+        if coint_status and signals['z'].iloc[i] < signals['z lower limit'].iloc[i]:
+            #asset2 price is too low
+            signals.at[signals.index[i],'signals1'] = -1
+            
+        prev_status = coint_status
+        
+    signals['signals2'] = -signals['signals1']
+    
+    #signals imply holding. take the first order difference to obtain the execution signal
+    signals['positions1'] = signals['signals1'].diff()
+    signals['positions2'] = signals['signals2'].diff()
+    
+    #print(signals)
+    
+    return signals
+
+def plot(data,ticker1,ticker2):
+    
+    fig = plt.figure(figsize=(10,5))
+    bx = fig.add_subplot(111)
+    bx2 = bx.twinx()
+    
+    #Assets
+    #the trailing commam , unpacks the returned list into a single variable
+    #data.index for time(dates)
+    asset1_price, = bx.plot(data.index,data['asset1'],c='#113aac',alpha=0.7)
+    asset2_price, = bx2.plot(data.index,data['asset2'],c='#907163',alpha=0.7)
+    
+    #Positions
+    asset1_long,=bx.plot(data.loc[data['positions1']==1].index,
+                data['asset1'][data['positions1']==1],
+                lw=0,marker='^',markersize=8,
+                c='g',alpha=0.7)
+    asset1_short,=bx.plot(data.loc[data['positions1']==-1].index,
+                data['asset1'][data['positions1']==-1],
+                lw=0,marker='v',markersize=8,
+                c='r',alpha=0.7)
+    asset2_long,=bx2.plot(data.loc[data['positions2']==1].index,
+                 data['asset2'][data['positions2']==1],
+                 lw=0,marker='^',markersize=8,
+                 c='g',alpha=0.7)
+    asset2_short,=bx2.plot(data.loc[data['positions2']==-1].index,
+                 data['asset2'][data['positions2']==-1],
+                 lw=0,marker='v',markersize=8,
+                 c='r',alpha=0.7)
+                               
+    bx.set_ylabel(ticker1,)
+    bx.yaxis.labelpad = 15
+    bx.set_xlabel('Date')
+    bx.xaxis.labelpad = 15
+    bx2.set_ylabel(ticker2, rotation=270)
+    bx2.yaxis.labelpad = 15
+    
+    plt.legend([asset1_price,asset2_price,asset1_long,asset1_short],
+               [ticker1,ticker2,
+               'LONG','SHORT'],
+               loc='lower left')
+    
+    plt.title("Pair Trading (Cissi)")
+    plt.xlabel('Date')
+    plt.grid(True)
+    plt.show()
+
+def portfolio(data):
+    
+    #initial capital to calculate the actual pnl
+    capital0 = 20000
+    
+    #shares to buy of each position
+    trade_size1 = capital0 // max(data['asset1'])
+    trade_size2 = capital0 // max(data['asset2'])
+    
+    #cumsum1 column is created to check the holding of the position
+    data['cumsum1'] = data['positions1'].cumsum()
+    
+    portfolio = pd.DataFrame()
+    portfolio['asset1_price'] = data['asset1']
+    #holdings1_t=(net signal units at time t)×(shares per unit)×(price of asset1 at time t)
+    portfolio['holdings1'] = data['cumsum1'] * trade_size1 * data['asset1']
+    portfolio['cash1'] = capital0 - (data['positions1'] * data['asset1'] * trade_size1).cumsum()
+    portfolio['total asset1'] = portfolio['holdings1'] + portfolio['cash1']
+    portfolio['return1'] = portfolio['total asset1'].pct_change() #percentage change
+    portfolio['positions1'] = data['positions1']
+    
+    data['cumsum2']=data['positions2'].cumsum()
+    
+    portfolio['asset2_price'] = data['asset2']
+    portfolio['holdings2'] = data['cumsum2'] * trade_size2 * data['asset2']
+    portfolio['cash2'] = capital0 - (data['positions2'] * data['asset2'] * trade_size2).cumsum()
+    portfolio['total asset2'] = portfolio['holdings2'] + portfolio['cash2']
+    portfolio['return2'] = portfolio['total asset2'].pct_change() #percentage change
+    portfolio['positions2'] = data['positions2']
+    
+    portfolio['z']= data['z']
+    portfolio['total asset'] = portfolio['total asset1'] + portfolio['total asset2']
+    portfolio['z upper limit'] = data['z upper limit']
+    portfolio['z lower limit'] = data['z lower limit']
+    
+    #plotting the asset value change of the portfolio
+    fig=plt.figure(figsize=(10,5))
+    ax=fig.add_subplot(111)
+    ax2=ax.twinx()
+    
+    total_asset_performance,=ax.plot(portfolio['total asset'],c='#46344e')
+    
+    z_stats,=ax2.plot(portfolio['z'],c='#4f4a41',alpha=0.2)
+ 
+    threshold=ax2.fill_between(portfolio.index,portfolio['z upper limit'],
+                               portfolio['z lower limit'],alpha=0.2,color='#ffb48f')
+    
+    ax.set_ylabel('Asset Value')
+    ax2.set_ylabel('Z Statistics',rotation=270)
+    ax.yaxis.labelpad=15
+    ax2.yaxis.labelpad=15
+    ax.set_xlabel('Date')
+    ax.xaxis.labelpad=15
+    
+    plt.legend([z_stats,threshold,total_asset_performance],
+               ['Z Statistics', 'Z Statistics +-1 Sigma',
+                'Total Asset Performance'],loc='best')
+    
+    plt.grid(True)   
+    plt.title('Total Asset (Cissi)')
+    plt.show()
+    
+    return portfolio
+
+def main():
+    
+    stdate='2023-09-08'
+    eddate='2025-09-07'
+    ticker1 = 'NVDA'
+    ticker2 = 'TSM'
+    
+    asset1 = pdr.DataReader("NVDA", "stooq", stdate, eddate).sort_index()
+    asset2 = pdr.DataReader("TSM",  "stooq", stdate, eddate).sort_index() 
+
+    signals = signal_generation(asset1,asset2,EG_method)
+
+    #only viz the part where trading signals occur
+    ind = signals['z'].dropna().index[0]
+
+    #viz positions
+    plot(signals[ind:],ticker1,ticker2)    
+
+    #viz portfolio performance
+    portfolio_details = portfolio(signals[ind:])
+    
+pd.options.mode.chained_assignment = None
+
+if __name__ == '__main__':
+    main()
