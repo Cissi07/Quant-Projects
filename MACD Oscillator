@@ -1,0 +1,153 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from pandas_datareader import data as pdr
+
+def volatility_filter(signals,window=20,multiplier=1.2):
+    
+    signals['volatility'] = signals['Close'].rolling(window).std()
+    signals['vol_threshold'] = signals['volatility'].rolling(window).median() * multiplier
+    signals['vol_filter'] = signals['volatility'] > signals['vol_threshold']
+    
+    return signals
+
+def sma(signals):
+    
+    signals['ma_short'] = signals['Close'].rolling(window=short,min_periods=1,center=False).mean()
+    signals['ma_long'] = signals['Close'].rolling(window=long,min_periods=1,center=False).mean()
+    
+    return signals
+
+def ema(signals):
+
+    signals['ma_short'] = signals['Close'].ewm(span=short,adjust=False).mean()
+    signals['ma_long'] = signals['Close'].ewm(span=long,adjust=False).mean()
+    
+    return signals
+    
+
+def signal_generation(df,method):
+    
+    signals = volatility_filter(method(df))
+    signals['positions'] = 0
+    
+    #position becomes and stays 1 once the short moving average is above long moving average
+    signals['positions'][short:] = np.where(
+        (signals['vol_filter'][short:]) & (signals['ma_short'][short:]>=signals['ma_long'][short:]),
+        1,0)
+    
+    signals['signals'] = signals['positions'].diff()
+    
+    #oscillator is the diff between two moving averages
+    #when it is positive, we long, vice versa
+    signals['oscillator'] = signals['ma_short'] - signals['ma_long']
+    
+    return signals
+
+def plot(data, ticker):
+    
+    #the close price with long/short positions
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    
+    data['Close'].plot(label=ticker)
+    
+    ax.plot(data.loc[data['signals']==1].index,
+           data['Close'][data['signals']==1],
+           label="LONG",
+           lw=0,marker="^",c="g")
+    ax.plot(data.loc[data['signals']==-1].index,
+           data['Close'][data['signals']==-1],
+           label="SHORT",
+           lw=0,marker="v",c="r")
+    
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.title('Positions')
+    
+    plt.show()
+    
+    #long/short moving average with oscillator
+    fig=plt.figure()
+    cx=fig.add_subplot(211)
+    
+    data['oscillator'].plot(kind='bar',color='r')
+    
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.xticks([])
+    plt.xlabel('')
+    plt.title('MACD Oscillator')
+    
+    bx=fig.add_subplot(212)
+    
+    data['ma_short'].plot(label='ma_short')
+    data['ma_long'].plot(label='ma_long',linestyle=':')
+    
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.show()
+    
+def portfolio(data,method=""):
+    
+    #initial capital to calculate the actual pnl
+    capital0 = 20000
+    
+    #shares to buy of each position
+    trade_size = capital0 // max(data['Close'])
+    
+    #cumsum1 column is created to check the holding of the position
+    data['cumsum'] = data['signals'].cumsum()
+    
+    portfolio = pd.DataFrame()
+    portfolio['price'] = data['Close']
+    
+    portfolio['holdings'] = data['cumsum'] * trade_size * data['Close']
+    portfolio['cash'] = capital0 - (data['signals'] * data['Close'] * trade_size).cumsum()
+    portfolio['total asset'] = portfolio['holdings'] + portfolio['cash']
+    portfolio['return'] = portfolio['total asset'].pct_change() #percentage change
+    portfolio['positions'] = data['signals']
+        
+    #plotting the asset value change of the portfolio
+    fig=plt.figure(figsize=(10,5))
+    ax=fig.add_subplot(111)
+    
+    total_asset_performance,=ax.plot(portfolio['total asset'],c='#46344e',label=method)
+    
+    ax.set_ylabel('Asset Value')
+    ax.yaxis.labelpad=15
+    ax.set_xlabel('Date')
+    ax.xaxis.labelpad=15
+    
+    plt.legend(loc='best')
+    plt.grid(True)   
+    plt.title('Total Asset (Cissi)')
+    plt.show()
+    
+    return portfolio
+    
+def main():
+    
+    global short, long, stdate, eddate, ticker
+    
+    #for classic MACD, short = 10 and long = 21 for 2 week versus 1 month
+    short = 10
+    long = 21
+    stdate='2023-09-08'
+    eddate='2025-09-07'
+    ticker = 'TSLA'
+    
+    slicer = 250
+    
+    df = pdr.DataReader(ticker, "stooq", stdate, eddate).sort_index()
+
+    data = signal_generation(df,ema)
+    data = data[slicer:]
+    plot(data, ticker)
+    portfolio_details = portfolio(data,"ema")
+    
+pd.options.mode.chained_assignment = None
+
+if __name__ == '__main__':
+    main()
