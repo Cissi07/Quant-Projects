@@ -1,3 +1,30 @@
+# MACD Oscillator
+
+MACD refers to Moving Average Convergence/Divergence. It is a momentum trading strategy which holds the belief that upward/downward momentum has more impact on short term moving average than long term moving average. It only takes 5 minutes for any bloke with no background in finance to trade with MACD signals. Regarding the simplicity of MACD oscillator, it is the most common strategy among the non-professionals in the market. In behavioral economics, the more people believe in the strategy, the more effective the strategy becomes (not always true, e.g. 2008). Therefore, we should not underestimate the power of MACD oscillator.
+
+### Simple Moving Average (SMA):
+- SMAs are simpler but lag more than EMAs(exponential moving average) used in MACD
+- SMAs generate binary crossover signals
+- SMAs are bets for long-term trend identification (e.g. 50/200-day SMAs)
+- .rolling().mean() is the standard SMA formula
+
+$SMA_t=\frac{1}{N} \sum^{N-1}_{i=0}x_{t-i}$
+e.g. Close = [100, 101, 102, 103, 104]:
+- min_periods=3: results = [NaN, NaN, 101.0, 102.0, 103.0]
+- min_periods=1: results = [100.0, 100.5, 101.0, 102.0, 103.0]
+
+### Exponential Moving Average (EMA)
+- Weights recent prices more than older ones, with weights that decay geometrically
+
+$EMA_t=\alpha x_t+(1-\alpha)EMA_{t-1}$ 
+where $x_t$ is the Close at time t and $\alpha=\frac{2}{span+1}$
+
+### Add volatility filer
+- Computes a rolling standard deviation of the Close price over the last window rows (trailing window)
+- Volatility threshold: Takes a rolling median of that volatility series (again over window rows) and scales it by multiplier. This is your volatility threshold: takes a rolling median of that volatility series and scales it by multiplier
+- Only act when current volatility is above the rolling-median threshold
+
+
 # Pair-trading
 
 ## Use Engle-Granger two-step method to test cointegration
